@@ -125,19 +125,13 @@ export default async function () {
   });
   await runTests(await spawnServer());
 
-  // Test with default build behavior (chunk optimization enabled)
-  // Only check the preload for the first entry (home)
+  // Test with default build behavior (chunk optimization enabled).
+  // Chunk optimization renames and may merge lazy chunks, so we cannot assert on the
+  // specific chunk names used above. Instead, verify that every emitted modulepreload
+  // link for each server route still resolves, ensuring optimization did not leave the
+  // preload metadata pointing at renamed (and therefore missing) chunks.
   await ng('build', '--output-mode=server');
-  const defaultServerPort = await spawnServer();
-
-  const res = await fetch(`http://localhost:${defaultServerPort}/`);
-  const text = await res.text();
-  const homeMatch = /<link rel="modulepreload" href="(home-[a-zA-Z0-9_]{8}\.js)">/;
-  assert.match(text, homeMatch, `Response for '/': ${homeMatch} was not matched in content.`);
-
-  const link = text.match(homeMatch)?.[1];
-  const preloadRes = await fetch(`http://localhost:${defaultServerPort}/${link}`);
-  assert.equal(preloadRes.status, 200);
+  await assertPreloadsResolve(await spawnServer());
 }
 
 const RESPONSE_EXPECTS: Record<
@@ -201,6 +195,35 @@ async function runTests(port: number): Promise<void> {
         text,
         match,
         `Response for '${pathname}': ${match} was matched in content.`,
+      );
+    }
+  }
+}
+
+/**
+ * Verifies that, for every server route, each emitted `modulepreload` link resolves
+ * to an existing chunk (HTTP 200). Unlike `runTests`, this does not assert on specific
+ * chunk names, so it is safe to use when chunk optimization renames/merges chunks.
+ */
+async function assertPreloadsResolve(port: number): Promise<void> {
+  const preloadRegExp = /<link rel="modulepreload" href="([^"]+)">/g;
+
+  for (const pathname of Object.keys(RESPONSE_EXPECTS)) {
+    const res = await fetch(`http://localhost:${port}${pathname}`);
+    const text = await res.text();
+    const hrefs = Array.from(text.matchAll(preloadRegExp), (match) => match[1]);
+
+    assert(
+      hrefs.length > 0,
+      `Response for '${pathname}' should contain at least one modulepreload link.`,
+    );
+
+    for (const href of hrefs) {
+      const preloadRes = await fetch(`http://localhost:${port}/${href}`);
+      assert.equal(
+        preloadRes.status,
+        200,
+        `Preloaded chunk '${href}' for '${pathname}' should resolve, but returned ${preloadRes.status}.`,
       );
     }
   }
